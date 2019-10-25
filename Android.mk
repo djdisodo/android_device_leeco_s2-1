@@ -22,7 +22,8 @@
 # bitrot and build breakages. Building a component unconditionally does
 # *not* include it on all devices, so it is safe even with hardware-specific
 # components
-
+COMMON_LUNCH_CHOICES := \
+	lineage_s2-userdebug
 LOCAL_PATH := $(call my-dir)
 
 ifneq ($(filter s2, $(TARGET_DEVICE)),)
