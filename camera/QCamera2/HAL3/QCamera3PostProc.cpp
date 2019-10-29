@@ -219,6 +219,34 @@ int32_t QCamera3PostProcessor::start(const reprocess_config_t &config,
 }
 
 /*===========================================================================
+ * FUNCTION   : flush
+ *
+ * DESCRIPTION: stop ongoing postprocess and jpeg jobs
+ *
+ * PARAMETERS : None
+ *
+ * RETURN     : int32_t type of status
+ *              NO_ERROR  -- success
+ *              none-zero failure code
+ *
+ *==========================================================================*/
+int32_t QCamera3PostProcessor::flush()
+{
+    int32_t rc = NO_ERROR;
+    qcamera_hal3_jpeg_data_t *jpeg_job =
+            (qcamera_hal3_jpeg_data_t *)m_ongoingJpegQ.dequeue();
+    while (jpeg_job != NULL) {
+        rc = mJpegHandle.abort_job(jpeg_job->jobId);
+        releaseJpegJobData(jpeg_job);
+        free(jpeg_job);
+
+        jpeg_job = (qcamera_hal3_jpeg_data_t *)m_ongoingJpegQ.dequeue();
+    }
+    rc = releaseOfflineBuffers(true);
+    return rc;
+}
+
+/*===========================================================================
  * FUNCTION   : stop
  *
  * DESCRIPTION: stop postprocessor. Data process and notify thread will be stopped.
@@ -333,6 +361,7 @@ int32_t QCamera3PostProcessor::getFWKJpegEncodeConfig(
     CDBG("%s : X", __func__);
     return NO_ERROR;
 
+on_error:
     CDBG("%s : X with error %d", __func__, ret);
     return ret;
 }
@@ -489,6 +518,7 @@ on_error:
  *==========================================================================*/
 int32_t QCamera3PostProcessor::processData(mm_camera_super_buf_t *frame)
 {
+    QCamera3HardwareInterface* hal_obj = (QCamera3HardwareInterface*)m_parent->mUserData;
     pthread_mutex_lock(&mReprocJobLock);
     // enqueue to post proc input queue
     m_inputPPQ.enqueue((void *)frame);
@@ -520,6 +550,7 @@ int32_t QCamera3PostProcessor::processData(qcamera_fwk_input_pp_data_t *frame)
 {
     QCamera3HardwareInterface* hal_obj = (QCamera3HardwareInterface*)m_parent->mUserData;
     if (hal_obj->needReprocess(mPostProcMask)) {
+        ATRACE_INT("Camera:Reprocess", 1);
         pthread_mutex_lock(&mReprocJobLock);
         // enqueu to post proc input queue
         m_inputFWKPPQ.enqueue((void *)frame);
@@ -643,7 +674,7 @@ int32_t QCamera3PostProcessor::processRawData(mm_camera_super_buf_t *frame)
 int32_t QCamera3PostProcessor::processPPData(mm_camera_super_buf_t *frame)
 {
     qcamera_hal3_pp_data_t *job = (qcamera_hal3_pp_data_t *)m_ongoingPPQ.dequeue();
-
+    ATRACE_INT("Camera:Reprocess", 0);
     if (job == NULL || ((NULL == job->src_frame) && (NULL == job->fwk_src_frame))) {
         ALOGE("%s: Cannot find reprocess job", __func__);
         return BAD_VALUE;
@@ -828,18 +859,19 @@ void QCamera3PostProcessor::releaseSuperBuf(mm_camera_super_buf_t *super_buf)
  *
  * DESCRIPTION: function to release/unmap offline buffers if any
  *
- * PARAMETERS : None
+ * PARAMETERS :
+ * @allBuffers : flag that asks to release all buffers or only one
  *
  * RETURN     : int32_t type of status
  *              NO_ERROR  -- success
  *              none-zero failure code
  *==========================================================================*/
-int32_t QCamera3PostProcessor::releaseOfflineBuffers()
+int32_t QCamera3PostProcessor::releaseOfflineBuffers(bool allBuffers)
 {
     int32_t rc = NO_ERROR;
 
     if(NULL != m_pReprocChannel) {
-        rc = m_pReprocChannel->unmapOfflineBuffers(false);
+        rc = m_pReprocChannel->unmapOfflineBuffers(allBuffers);
     }
 
     return rc;
@@ -923,6 +955,7 @@ mm_jpeg_color_format QCamera3PostProcessor::getColorfmtFromImgFmt(cam_format_t i
 {
     switch (img_fmt) {
     case CAM_FORMAT_YUV_420_NV21:
+    case CAM_FORMAT_YUV_420_NV21_VENUS:
         return MM_JPEG_COLOR_FORMAT_YCRCBLP_H2V2;
     case CAM_FORMAT_YUV_420_NV21_ADRENO:
         return MM_JPEG_COLOR_FORMAT_YCRCBLP_H2V2;
@@ -957,6 +990,7 @@ mm_jpeg_format_t QCamera3PostProcessor::getJpegImgTypeFromImgFmt(cam_format_t im
     case CAM_FORMAT_YUV_420_NV21_ADRENO:
     case CAM_FORMAT_YUV_420_NV12:
     case CAM_FORMAT_YUV_420_NV12_VENUS:
+    case CAM_FORMAT_YUV_420_NV21_VENUS:
     case CAM_FORMAT_YUV_420_YV12:
     case CAM_FORMAT_YUV_422_NV61:
     case CAM_FORMAT_YUV_422_NV16:

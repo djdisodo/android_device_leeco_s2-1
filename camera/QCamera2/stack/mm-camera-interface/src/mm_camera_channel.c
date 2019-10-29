@@ -147,7 +147,6 @@ void mm_channel_node_qbuf(mm_channel_t *ch_obj, mm_channel_queue_node_t *node);
 void mm_channel_send_super_buf(mm_channel_node_info_t *info);
 mm_channel_queue_node_t* mm_channel_superbuf_dequeue_frame_internal(
         mm_channel_queue_t * queue, uint32_t frame_idx);
-uint8_t mm_channel_check_aec(mm_channel_queue_node_t *node);
 
 /*===========================================================================
  * FUNCTION   : mm_channel_util_get_stream_by_handler
@@ -230,6 +229,10 @@ static void mm_channel_process_stream_buf(mm_camera_cmdcb_t * cmd_cb,
     mm_channel_queue_node_t *node = NULL;
     mm_channel_t *ch_obj = (mm_channel_t *)user_data;
     uint32_t i = 0;
+    /* Set expected frame id to a future frame idx, large enough to wait
+    * for good_frame_idx_range, and small enough to still capture an image */
+    const uint32_t max_future_frame_offset = MM_CAMERA_MAX_FUTURE_FRAME_WAIT;
+    uint8_t needStartZSL = FALSE;
 
     if (NULL == ch_obj) {
         return;
@@ -336,13 +339,21 @@ static void mm_channel_process_stream_buf(mm_camera_cmdcb_t * cmd_cb,
                     __func__, __LINE__, start);
 
                 if (start) {
-                    ch_obj->frameConfig = cmd_cb->u.gen_cmd.frame_config;
+                    memset(&ch_obj->frameConfig, 0, sizeof(cam_capture_frame_config_t));
+                    for (i = 0; i < cmd_cb->u.gen_cmd.frame_config.num_batch; i++) {
+                        if (cmd_cb->u.gen_cmd.frame_config.configs[i].type
+                                != CAM_CAPTURE_RESET) {
+                            ch_obj->frameConfig.configs[
+                                    ch_obj->frameConfig.num_batch] =
+                                    cmd_cb->u.gen_cmd.frame_config.configs[i];
+                            ch_obj->frameConfig.num_batch++;
+                            CDBG("capture setting frame = %d type = %d",
+                                    i,ch_obj->frameConfig.configs[
+                                    ch_obj->frameConfig.num_batch].type);
+                        }
+                    }
                     CDBG_HIGH("%s:%d] Capture setting Batch Count %d",
                             __func__, __LINE__, ch_obj->frameConfig.num_batch);
-                    for (i = 0; i < ch_obj->frameConfig.num_batch; i++) {
-                        CDBG("capture setting frame = %d type = %d",
-                                i,ch_obj->frameConfig.configs[i].type);
-                    }
                     ch_obj->isConfigCapture = TRUE;
                 } else {
                     ch_obj->isConfigCapture = FALSE;
@@ -359,11 +370,35 @@ static void mm_channel_process_stream_buf(mm_camera_cmdcb_t * cmd_cb,
     }
     notify_mode = ch_obj->bundle.superbuf_queue.attr.notify_mode;
 
+    /*Handle use case which does not need start ZSL even in unified case*/
     if ((ch_obj->pending_cnt > 0)
+            && (ch_obj->isConfigCapture)
             && (ch_obj->manualZSLSnapshot == FALSE)
-            && (ch_obj->startZSlSnapshotCalled == FALSE)
-            && (ch_obj->needLEDFlash == TRUE)
-            && (ch_obj->isConfigCapture)) {
+            && (ch_obj->startZSlSnapshotCalled == FALSE)) {
+        needStartZSL = TRUE;
+        for (i = ch_obj->cur_capture_idx;
+                i < ch_obj->frameConfig.num_batch;
+                i++) {
+            cam_capture_type type = ch_obj->frameConfig.configs[i].type;
+            if (((type == CAM_CAPTURE_FLASH) && (!ch_obj->needLEDFlash))
+                    || ((type == CAM_CAPTURE_LOW_LIGHT) && (!ch_obj->needLowLightZSL))) {
+                /*For flash and low light capture, start ZSL is triggered only if needed*/
+                needStartZSL = FALSE;
+                break;
+            }
+        }
+    }
+
+    if ((ch_obj->isConfigCapture)
+            && (needStartZSL)) {
+        for (i = ch_obj->cur_capture_idx;
+                i < ch_obj->frameConfig.num_batch;
+                i++) {
+            ch_obj->capture_frame_id[i] =
+                    ch_obj->bundle.superbuf_queue.expected_frame_id
+                    + MM_CAMERA_MAX_FUTURE_FRAME_WAIT;
+        }
+
         /* Need to Flush the queue and trigger frame config */
         mm_channel_superbuf_flush(ch_obj,
                 &ch_obj->bundle.superbuf_queue, CAM_STREAM_TYPE_DEFAULT);
@@ -373,7 +408,7 @@ static void mm_channel_process_stream_buf(mm_camera_cmdcb_t * cmd_cb,
         ch_obj->burstSnapNum = ch_obj->pending_cnt;
         ch_obj->bWaitForPrepSnapshotDone = 0;
     } else if ((ch_obj->pending_cnt > 0)
-        && ( (ch_obj->needLEDFlash == TRUE) ||
+        && ((ch_obj->needLEDFlash == TRUE) ||
         (MM_CHANNEL_BRACKETING_STATE_OFF != ch_obj->bracketingState))
         && (ch_obj->manualZSLSnapshot == FALSE)
         && ch_obj->startZSlSnapshotCalled == FALSE) {
@@ -414,6 +449,7 @@ static void mm_channel_process_stream_buf(mm_camera_cmdcb_t * cmd_cb,
       CDBG_HIGH("%s: [ZSL Retro] In loop pending cnt (%d), req type (%d)",
             __func__, ch_obj->pending_cnt, ch_obj->req_type);
         /* dequeue */
+        uint32_t match_frame = 0;
         mm_channel_node_info_t info;
         memset(&info, 0x0, sizeof(info));
         if (ch_obj->req_type == MM_CAMERA_REQ_FRAME_SYNC_BUF) {
@@ -451,11 +487,8 @@ static void mm_channel_process_stream_buf(mm_camera_cmdcb_t * cmd_cb,
                     for (j = 0; j < info.num_nodes; j++) {
                         if (info.node[j]) {
                             mm_channel_node_qbuf(info.ch_obj[j], info.node[j]);
-                            free(info.node[j]);
                         }
                     }
-                    //we should not use it as matched dual camera frames
-                    info.num_nodes = 0;
                 }
             }
             mm_frame_sync_unlock_queues();
@@ -463,40 +496,22 @@ static void mm_channel_process_stream_buf(mm_camera_cmdcb_t * cmd_cb,
            node = mm_channel_superbuf_dequeue(&ch_obj->bundle.superbuf_queue, ch_obj);
            if (node != NULL) {
                if (ch_obj->isConfigCapture &&
-                        (node->frame_idx < ch_obj->capture_frame_id[ch_obj->cur_capture_idx])) {
+                       ((node->frame_idx <
+                        ch_obj->capture_frame_id[ch_obj->cur_capture_idx]))) {
                    uint8_t i;
                    for (i = 0; i < node->num_of_bufs; i++) {
                        mm_channel_qbuf(ch_obj, node->super_buf[i].buf);
                    }
                    free(node);
                } else {
-                   if (ch_obj->bundle.superbuf_queue.attr.instant_capture_enabled) {
-                       // If instant capture enabled, wait until the AEC is settled
-                       // check if AEC is settled or waited more than the aec frame bound.
-                       if (!mm_channel_check_aec(node) &&
-                                (ch_obj->bundle.superbuf_queue.frame_num_for_instant_capture <
-                                ch_obj->bundle.superbuf_queue.attr.aec_frame_bound)) {
-                           uint8_t i;
-                           for (i = 0; i < node->num_of_bufs; i++) {
-                               mm_channel_qbuf(ch_obj, node->super_buf[i].buf);
-                           }
-                           ch_obj->bundle.superbuf_queue.frame_num_for_instant_capture++;
-                           free(node);
-                       } else {
-                           info.num_nodes = 1;
-                           info.ch_obj[0] = ch_obj;
-                           info.node[0] = node;
-                           ch_obj->bundle.superbuf_queue.frame_num_for_instant_capture = 0;
-                       }
-                   } else {
-                       info.num_nodes = 1;
-                       info.ch_obj[0] = ch_obj;
-                       info.node[0] = node;
-                   }
+                   info.num_nodes = 1;
+                   info.ch_obj[0] = ch_obj;
+                   info.node[0] = node;
                }
             }
         }
         if (info.num_nodes > 0) {
+             uint8_t bReady = 0;
 
             /* decrease pending_cnt */
             if (MM_CAMERA_SUPER_BUF_NOTIFY_BURST == notify_mode) {
@@ -1507,7 +1522,6 @@ int32_t mm_channel_start(mm_channel_t *my_obj)
         my_obj->bundle.superbuf_queue.led_off_start_frame_id = 0;
         my_obj->bundle.superbuf_queue.led_on_start_frame_id = 0;
         my_obj->bundle.superbuf_queue.led_on_num_frames = 0;
-        my_obj->bundle.superbuf_queue.frame_num_for_instant_capture = 0;
 
         for (i = 0; i < num_streams_to_start; i++) {
             /* Only bundle streams that belong to the channel */
@@ -2349,34 +2363,6 @@ int8_t mm_channel_util_seq_comp_w_rollover(uint32_t v1,
     return ret;
 }
 
-uint8_t mm_channel_check_aec(mm_channel_queue_node_t *node)
-{
-    uint8_t i = 0;
-    const metadata_buffer_t *metadata = NULL;
-    uint8_t is_settled = 0;
-    for (i = 0; i < node->num_of_bufs; i++) {
-        if (node->super_buf[i].buf->stream_type == CAM_STREAM_TYPE_METADATA) {
-            metadata = (const metadata_buffer_t *)node->super_buf[i].buf->buffer;
-            break;
-        }
-    }
-
-    if (i == node->num_of_bufs) {
-        CDBG_ERROR("%s: no metadata stream , ignore is_settled",
-                   __func__);
-        is_settled = 1;
-    } else if (NULL == metadata) {
-        CDBG_ERROR("%s: NULL metadata buffer for metadata stream",
-                   __func__);
-    } else {
-        IF_META_AVAILABLE(const cam_3a_params_t, ae_params, CAM_INTF_META_AEC_INFO, metadata) {
-            is_settled = ae_params->settled;
-        }
-    }
-    CDBG("%s: is_settled %d", __func__ ,is_settled);
-    return is_settled;
-}
-
 /*===========================================================================
  * FUNCTION   : mm_channel_handle_metadata
  *
@@ -2410,7 +2396,7 @@ int32_t mm_channel_handle_metadata(
     uint32_t i;
     /* Set expected frame id to a future frame idx, large enough to wait
     * for good_frame_idx_range, and small enough to still capture an image */
-    const uint32_t max_future_frame_offset = 100U;
+    const uint32_t max_future_frame_offset = MM_CAMERA_MAX_FUTURE_FRAME_WAIT;
 
     memset(&good_frame_idx_range, 0, sizeof(good_frame_idx_range));
 
@@ -2606,6 +2592,11 @@ int32_t mm_channel_handle_metadata(
                         __func__, buf_info->frame_idx, queue->expected_frame_id);
          }
        }
+
+        IF_META_AVAILABLE(const cam_low_light_mode_t, low_light_level,
+            CAM_INTF_META_LOW_LIGHT, metadata) {
+            ch_obj->needLowLightZSL = *low_light_level;
+        }
     }
 end:
     return rc;

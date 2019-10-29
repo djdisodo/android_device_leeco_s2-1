@@ -50,8 +50,6 @@
 #define GET_PARM_BIT32(parm, parm_arr) \
     ((parm_arr[parm/32]>>(parm%32))& 0x1)
 
-#define WAIT_TIMEOUT 3
-
 /* internal function declare */
 int32_t mm_camera_evt_sub(mm_camera_obj_t * my_obj,
                           uint8_t reg_flag);
@@ -262,7 +260,6 @@ int32_t mm_camera_open(mm_camera_obj_t *my_obj)
     const char *dev_name_value = NULL;
     char prop[PROPERTY_VALUE_MAX];
     uint32_t globalLogLevel = 0;
-    int l_errno = 0;
 
     property_get("persist.camera.hal.debug", prop, "0");
     int val = atoi(prop);
@@ -296,9 +293,8 @@ int32_t mm_camera_open(mm_camera_obj_t *my_obj)
     do{
         n_try--;
         my_obj->ctrl_fd = open(dev_name, O_RDWR | O_NONBLOCK);
-        l_errno = errno;
-        CDBG("%s:  ctrl_fd = %d, errno == %d", __func__, my_obj->ctrl_fd, l_errno);
-        if((my_obj->ctrl_fd >= 0) || (l_errno != EIO) || (n_try <= 0 )) {
+        CDBG("%s:  ctrl_fd = %d, errno == %d", __func__, my_obj->ctrl_fd, errno);
+        if((my_obj->ctrl_fd >= 0) || (errno != EIO) || (n_try <= 0 )) {
             CDBG("%s:  opened, break out while loop", __func__);
             break;
         }
@@ -309,8 +305,8 @@ int32_t mm_camera_open(mm_camera_obj_t *my_obj)
 
     if (my_obj->ctrl_fd < 0) {
         CDBG_ERROR("%s: cannot open control fd of '%s' (%s)\n",
-                 __func__, dev_name, strerror(l_errno));
-        if (l_errno == EBUSY)
+                 __func__, dev_name, strerror(errno));
+        if (errno == EBUSY)
             rc = -EUSERS;
         else
             rc = -1;
@@ -322,8 +318,7 @@ int32_t mm_camera_open(mm_camera_obj_t *my_obj)
     do {
         n_try--;
         my_obj->ds_fd = mm_camera_socket_create(cam_idx, MM_CAMERA_SOCK_TYPE_UDP);
-        l_errno = errno;
-        CDBG("%s:  ds_fd = %d, errno = %d", __func__, my_obj->ds_fd, l_errno);
+        CDBG("%s:  ds_fd = %d, errno = %d", __func__, my_obj->ds_fd, errno);
         if((my_obj->ds_fd >= 0) || (n_try <= 0 )) {
             CDBG("%s:  opened, break out while loop", __func__);
             break;
@@ -335,7 +330,7 @@ int32_t mm_camera_open(mm_camera_obj_t *my_obj)
 
     if (my_obj->ds_fd < 0) {
         CDBG_ERROR("%s: cannot open domain socket fd of '%s'(%s)\n",
-                 __func__, dev_name, strerror(l_errno));
+                 __func__, dev_name, strerror(errno));
         rc = -1;
         goto on_error;
     }
@@ -1768,7 +1763,7 @@ void mm_camera_util_wait_for_event(mm_camera_obj_t *my_obj,
                                    uint32_t evt_mask,
                                    uint32_t *status)
 {
-    int rc = 0;
+    int32_t rc = 0;
     struct timespec ts;
 
     pthread_mutex_lock(&my_obj->evt_lock);
@@ -1776,12 +1771,17 @@ void mm_camera_util_wait_for_event(mm_camera_obj_t *my_obj,
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_sec += WAIT_TIMEOUT;
         rc = pthread_cond_timedwait(&my_obj->evt_cond, &my_obj->evt_lock, &ts);
-        if (rc == ETIMEDOUT) {
-            ALOGE("%s pthread_cond_timedwait success\n", __func__);
+        if (rc) {
+            ALOGE("%s: pthread_cond_timedwait of evt_mask 0x%x fails %d",
+                    __func__, evt_mask, rc);
             break;
         }
     }
-    *status = my_obj->evt_rcvd.status;
+    if (!rc) {
+        *status = my_obj->evt_rcvd.status;
+    } else {
+        *status = MSM_CAMERA_STATUS_FAIL;
+    }
     /* reset local storage for recieved event for next event */
     memset(&my_obj->evt_rcvd, 0, sizeof(mm_camera_event_t));
     pthread_mutex_unlock(&my_obj->evt_lock);
@@ -2198,6 +2198,7 @@ int32_t mm_camera_reg_stream_buf_cb(mm_camera_obj_t *my_obj,
         mm_camera_stream_cb_type cb_type, void *userdata)
 {
     int rc = 0;
+    mm_stream_t *stream = NULL;
     mm_stream_data_cb_t buf_cb;
     mm_channel_t * ch_obj =
             mm_camera_util_get_channel_by_handler(my_obj, ch_id);

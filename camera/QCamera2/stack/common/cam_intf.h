@@ -30,7 +30,6 @@
 #ifndef __QCAMERA_INTF_H__
 #define __QCAMERA_INTF_H__
 
-#include <string.h>
 #include <media/msmb_isp.h>
 #include "cam_types.h"
 
@@ -402,6 +401,23 @@ typedef struct{
     uint32_t buf_alignment;
     uint32_t min_stride;
     uint32_t min_scanline;
+    uint8_t flash_dev_name[QCAMERA_MAX_FILEPATH_LENGTH];
+    uint8_t eeprom_version_info[MAX_EEPROM_VERSION_INFO_LEN];
+
+    /* maximum pixel bandwidth shared between cameras */
+    uint64_t max_pixel_bandwidth;
+
+    /* Array of K integers, where K%4==0,
+      as a list of rectangles in the pixelArray co-ord system
+      left, top, right, bottom */
+    int32_t optical_black_regions[MAX_OPTICAL_BLACK_REGIONS * 4];
+    /* Count is K/4 */
+    uint8_t optical_black_region_count;
+
+    /* hot pixel */
+    uint8_t hotPixel_mode;
+    uint32_t hotPixel_count;
+    cam_coordinate_type_t hotPixelMap[512];
 } cam_capability_t;
 
 typedef enum {
@@ -410,6 +426,7 @@ typedef enum {
     CAM_STREAM_PARAM_TYPE_SET_FLIP = CAM_INTF_PARM_STREAM_FLIP,
     CAM_STREAM_PARAM_TYPE_GET_OUTPUT_CROP = CAM_INTF_PARM_GET_OUTPUT_CROP,
     CAM_STREAM_PARAM_TYPE_GET_IMG_PROP = CAM_INTF_PARM_GET_IMG_PROP,
+    CAM_STREAM_PARAM_TYPE_REQUEST_FRAMES = CAM_INTF_PARM_REQUEST_FRAMES,
     CAM_STREAM_PARAM_TYPE_MAX
 } cam_stream_param_type_e;
 
@@ -523,13 +540,7 @@ typedef struct {
     uint16_t   rotation_flag;
     /* Reserved for future use */
     float      reserved[RELCAM_CALIB_RESERVED_MAX];
-} cam_related_system_calibration_data_t;
-
-typedef struct {
-  uint32_t default_sensor_flip;
-  uint32_t sensor_mount_angle;
-  cam_related_system_calibration_data_t otp_calibration_data;
-} cam_jpeg_metadata_t;
+}cam_related_system_calibration_data_t;
 
 #define IMG_NAME_SIZE 32
 typedef struct {
@@ -541,6 +552,10 @@ typedef struct {
 } cam_stream_img_prop_t;
 
 typedef struct {
+    uint8_t enableStream; /*0 – stop and 1-start */
+} cam_request_frames;
+
+typedef struct {
     cam_stream_param_type_e type;
     union {
         cam_reprocess_param reprocess;  /* do reprocess */
@@ -548,6 +563,7 @@ typedef struct {
         cam_flip_mode_t flipInfo;       /* flip mode */
         cam_crop_data_t outputCrop;     /* output crop for current frame */
         cam_stream_img_prop_t imgProp;  /* image properties of current frame */
+        cam_request_frames frameRequest; /*do TNR process*/
     };
 } cam_stream_parm_buffer_t;
 
@@ -704,6 +720,7 @@ typedef struct {
     INCLUDE(CAM_INTF_META_HISTOGRAM,                    cam_hist_stats_t,               1);
     INCLUDE(CAM_INTF_META_FACE_DETECTION,               cam_face_detection_data_t,      1);
     INCLUDE(CAM_INTF_META_AUTOFOCUS_DATA,               cam_auto_focus_data_t,          1);
+    INCLUDE(CAM_INTF_META_CDS_DATA,                     cam_cds_data_t,                 1);
     INCLUDE(CAM_INTF_PARM_UPDATE_DEBUG_LEVEL,           uint32_t,                       1);
 
     /* Specific to HAl1 */
@@ -862,7 +879,6 @@ typedef struct {
     INCLUDE(CAM_INTF_PARM_BURST_LED_ON_PERIOD,          uint32_t,                    1);
     INCLUDE(CAM_INTF_PARM_LONGSHOT_ENABLE,              int8_t,                      1);
     INCLUDE(CAM_INTF_PARM_TONE_MAP_MODE,                uint32_t,                    1);
-    INCLUDE(CAM_INTF_PARM_DUAL_LED_CALIBRATION,         uint32_t,                    1);
 
     /* HAL3 specific */
     INCLUDE(CAM_INTF_META_STREAM_INFO,                  cam_stream_size_info_t,      1);
@@ -902,8 +918,12 @@ typedef struct {
     INCLUDE(CAM_INTF_PARM_CAPTURE_FRAME_CONFIG,         cam_capture_frame_config_t,  1);
     INCLUDE(CAM_INTF_PARM_CUSTOM,                       custom_parm_buffer_t,        1);
     INCLUDE(CAM_INTF_PARM_FLIP,                         int32_t,                     1);
-    INCLUDE(CAM_INTF_AF_STATE_TRANSITION,               uint8_t,                     1);
-    INCLUDE(CAM_INTF_PARM_INSTANT_AEC,                  uint8_t,                     1);
+    INCLUDE(CAM_INTF_META_USE_AV_TIMER,                 uint8_t,                     1);
+    INCLUDE(CAM_INTF_META_LDAF_EXIF,                    uint32_t,                    2);
+    INCLUDE(CAM_INTF_META_BLACK_LEVEL_SOURCE_PATTERN,   cam_black_level_metadata_t,  1);
+    INCLUDE(CAM_INTF_META_BLACK_LEVEL_APPLIED_PATTERN,  cam_black_level_metadata_t,  1);
+    INCLUDE(CAM_INTF_META_LOW_LIGHT,                    cam_low_light_mode_t,        1);
+    INCLUDE(CAM_INTF_PARM_MANUAL_CAPTURE_TYPE,          cam_manual_capture_type,     1);
 } metadata_data_t;
 
 /* Update clear_metadata_buffer() function when a new is_xxx_valid is added to

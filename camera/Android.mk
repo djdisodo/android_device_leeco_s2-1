@@ -11,15 +11,14 @@ MM_V4L2_DRIVER_LIST += msm8994
 MM_V4L2_DRIVER_LIST += msm8084
 MM_V4L2_DRIVER_LIST += msm8909
 MM_V4L2_DRIVER_LIST += msm8952
+MM_V4L2_DRIVER_LIST += thorium
 MM_V4L2_DRIVER_LIST += msm8996
 MM_V4L2_DRIVER_LIST += msm8992
 
 ifneq (,$(filter $(MM_V4L2_DRIVER_LIST),$(TARGET_BOARD_PLATFORM)))
   ifneq ($(strip $(USE_CAMERA_STUB)),true)
     ifneq ($(BUILD_TINY_ANDROID),true)
-      ifneq ($(USE_PROPRIETARY_CAMERA),true)
-        include $(call all-subdir-makefiles)
-      endif
+      include $(call all-subdir-makefiles)
     endif
   endif
 endif

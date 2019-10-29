@@ -130,6 +130,7 @@ QCameraMuxer::QCameraMuxer(uint32_t num_of_cameras)
       m_pPhyCamera(NULL),
       m_pLogicalCamera(NULL),
       m_pCallbacks(NULL),
+      m_bDualCameraEnabled(FALSE),
       m_bAuxCameraExposed(FALSE),
       m_nPhyCameras(num_of_cameras),
       m_nLogicalCameras(0),
@@ -140,8 +141,7 @@ QCameraMuxer::QCameraMuxer(uint32_t num_of_cameras)
       m_pJpegCallbackCookie(NULL),
       m_bDumpImages(FALSE),
       m_bMpoEnabled(TRUE),
-      m_bFrameSyncEnabled(FALSE),
-      m_bRecordingHintInternallySet(FALSE)
+      m_bFrameSyncEnabled(FALSE)
 {
     setupLogicalCameras();
     memset(&mJpegOps, 0, sizeof(mJpegOps));
@@ -247,7 +247,7 @@ int QCameraMuxer::get_camera_info(int camera_id, struct camera_info *info)
  *              NO_ERROR  : success
  *              other: non-zero failure code
  *==========================================================================*/
-int QCameraMuxer::set_callbacks(__unused const camera_module_callbacks_t *callbacks)
+int QCameraMuxer::set_callbacks(const camera_module_callbacks_t *callbacks)
 {
     // Not implemented
     return NO_ERROR;
@@ -269,7 +269,7 @@ int QCameraMuxer::set_callbacks(__unused const camera_module_callbacks_t *callba
  *              other: non-zero failure code
  *==========================================================================*/
 int QCameraMuxer::camera_device_open(
-        __unused const struct hw_module_t *module, const char *id,
+        const struct hw_module_t *module, const char *id,
         struct hw_device_t **hw_device)
 {
     int rc = NO_ERROR;
@@ -300,8 +300,8 @@ int QCameraMuxer::camera_device_open(
  *              BAD_VALUE : Invalid Camera ID
  *              other: non-zero failure code
  *==========================================================================*/
-int QCameraMuxer::open_legacy(__unused const struct hw_module_t* module,
-        const char* id, __unused uint32_t halVersion, struct hw_device_t** hw_device)
+int QCameraMuxer::open_legacy(const struct hw_module_t* module,
+        const char* id, uint32_t halVersion, struct hw_device_t** hw_device)
 {
     int rc = NO_ERROR;
     CDBG_HIGH("%s[%d]: id= %d", __func__, __LINE__, atoi(id));
@@ -643,11 +643,6 @@ void QCameraMuxer::stop_preview(struct camera_device * device)
 
         QCamera2HardwareInterface::stop_preview(pCam->dev);
     }
-
-    //Flush JPEG Queues. Nodes in Main and Aux JPEGQ are not valid after preview stopped.
-    gMuxer->m_MainJpegQ.flush();
-    gMuxer->m_AuxJpegQ.flush();
-
     CDBG_HIGH("%s: X", __func__);
 }
 
@@ -740,90 +735,9 @@ int QCameraMuxer::start_recording(struct camera_device * device)
     CDBG_HIGH("%s: E", __func__);
     CHECK_MUXER_ERROR();
     int rc = NO_ERROR;
-    bool previewRestartNeeded = false;
     qcamera_physical_descriptor_t *pCam = NULL;
     qcamera_logical_descriptor_t *cam = gMuxer->getLogicalCamera(device);
     CHECK_CAMERA_ERROR(cam);
-
-    // In cases where recording hint is not set, hwi->start_recording will
-    // internally restart the preview.
-    // To take the preview restart control in muxer,
-    // 1. call pre_start_recording first
-    for (uint32_t i = 0; i < cam->numCameras; i++) {
-        pCam = gMuxer->getPhysicalCamera(cam, i);
-        CHECK_CAMERA_ERROR(pCam);
-
-        QCamera2HardwareInterface *hwi = pCam->hwi;
-        CHECK_HWI_ERROR(hwi);
-
-        rc = hwi->pre_start_recording(pCam->dev);
-        if (rc != NO_ERROR) {
-            ALOGE("%s: Error preparing recording start!! ", __func__);
-            return rc;
-        }
-    }
-
-    // 2. Check if preview restart is needed. Check all cameras.
-    for (uint32_t i = 0; i < cam->numCameras; i++) {
-        pCam = gMuxer->getPhysicalCamera(cam, i);
-        CHECK_CAMERA_ERROR(pCam);
-
-        QCamera2HardwareInterface *hwi = pCam->hwi;
-        CHECK_HWI_ERROR(hwi);
-
-        if (hwi->isPreviewRestartNeeded()) {
-            previewRestartNeeded = hwi->isPreviewRestartNeeded();
-            break;
-        }
-    }
-
-    if (previewRestartNeeded) {
-        // 3. if preview restart needed. stop the preview first
-        for (uint32_t i = 0; i < cam->numCameras; i++) {
-            pCam = gMuxer->getPhysicalCamera(cam, i);
-            CHECK_CAMERA_ERROR(pCam);
-
-            QCamera2HardwareInterface *hwi = pCam->hwi;
-            CHECK_HWI_ERROR(hwi);
-
-            rc = hwi->restart_stop_preview(pCam->dev);
-            if (rc != NO_ERROR) {
-                ALOGE("%s: Error in restart stop preview!! ", __func__);
-                return rc;
-            }
-        }
-
-        //4. Update the recording hint value to TRUE
-        for (uint32_t i = 0; i < cam->numCameras; i++) {
-            pCam = gMuxer->getPhysicalCamera(cam, i);
-            CHECK_CAMERA_ERROR(pCam);
-
-            QCamera2HardwareInterface *hwi = pCam->hwi;
-            CHECK_HWI_ERROR(hwi);
-
-            rc = hwi->setRecordingHintValue(TRUE);
-            if (rc != NO_ERROR) {
-                ALOGE("%s: Error in setting recording hint value!! ", __func__);
-                return rc;
-            }
-            gMuxer->m_bRecordingHintInternallySet = TRUE;
-        }
-
-        // 5. start the preview
-        for (uint32_t i = 0; i < cam->numCameras; i++) {
-            pCam = gMuxer->getPhysicalCamera(cam, i);
-            CHECK_CAMERA_ERROR(pCam);
-
-            QCamera2HardwareInterface *hwi = pCam->hwi;
-            CHECK_HWI_ERROR(hwi);
-
-            rc = hwi->restart_start_preview(pCam->dev);
-            if (rc != NO_ERROR) {
-                ALOGE("%s: Error in restart start preview!! ", __func__);
-                return rc;
-            }
-        }
-    }
 
     for (uint32_t i = 0; i < cam->numCameras; i++) {
         pCam = gMuxer->getPhysicalCamera(cam, i);
@@ -856,7 +770,6 @@ int QCameraMuxer::start_recording(struct camera_device * device)
  *==========================================================================*/
 void QCameraMuxer::stop_recording(struct camera_device * device)
 {
-    int rc = NO_ERROR;
     CDBG_HIGH("%s: E", __func__);
     CHECK_MUXER();
     qcamera_physical_descriptor_t *pCam = NULL;
@@ -873,57 +786,6 @@ void QCameraMuxer::stop_recording(struct camera_device * device)
         if (pCam->mode == CAM_MODE_PRIMARY) {
             QCamera2HardwareInterface::stop_recording(pCam->dev);
             break;
-        }
-    }
-
-    // If recording hint is set internally to TRUE,
-    // we need to set it to FALSE.
-    // preview restart is needed in between
-    if (gMuxer->m_bRecordingHintInternallySet) {
-        // stop the preview first
-        for (uint32_t i = 0; i < cam->numCameras; i++) {
-            pCam = gMuxer->getPhysicalCamera(cam, i);
-            CHECK_CAMERA(pCam);
-
-            QCamera2HardwareInterface *hwi = pCam->hwi;
-            CHECK_HWI(hwi);
-
-            rc = hwi->restart_stop_preview(pCam->dev);
-            if (rc != NO_ERROR) {
-                ALOGE("%s: Error in restart stop preview!! ", __func__);
-                return;
-            }
-        }
-
-        // Update the recording hint value to FALSE
-        for (uint32_t i = 0; i < cam->numCameras; i++) {
-            pCam = gMuxer->getPhysicalCamera(cam, i);
-            CHECK_CAMERA(pCam);
-
-            QCamera2HardwareInterface *hwi = pCam->hwi;
-            CHECK_HWI(hwi);
-
-            rc = hwi->setRecordingHintValue(FALSE);
-            if (rc != NO_ERROR) {
-                ALOGE("%s: Error in setting recording hint value!! ", __func__);
-                return;
-            }
-            gMuxer->m_bRecordingHintInternallySet = FALSE;
-        }
-
-        // start the preview
-        for (uint32_t i = 0; i < cam->numCameras; i++) {
-            pCam = gMuxer->getPhysicalCamera(cam, i);
-            CHECK_CAMERA(pCam);
-
-            QCamera2HardwareInterface *hwi = pCam->hwi;
-            CHECK_HWI(hwi);
-
-            rc = hwi->restart_start_preview(pCam->dev);
-            if (rc != NO_ERROR) {
-                ALOGE("%s: Error in restart start preview!! ", __func__);
-                return;
-            }
         }
     }
     CDBG_HIGH("%s: X", __func__);
@@ -1096,7 +958,6 @@ int QCameraMuxer::take_picture(struct camera_device * device)
     CDBG_HIGH("%s: E", __func__);
     CHECK_MUXER_ERROR();
     int rc = NO_ERROR;
-    bool previewRestartNeeded = false;
     qcamera_physical_descriptor_t *pCam = NULL;
     qcamera_logical_descriptor_t *cam = gMuxer->getLogicalCamera(device);
     CHECK_CAMERA_ERROR(cam);
@@ -1104,12 +965,6 @@ int QCameraMuxer::take_picture(struct camera_device * device)
     char prop[PROPERTY_VALUE_MAX];
     property_get("persist.camera.dual.camera.mpo", prop, "1");
     gMuxer->m_bMpoEnabled = atoi(prop);
-    //If only one Physical Camera included in Logical, disable MPO
-    int numOfAcitvePhyCam = 0;
-    gMuxer->getActiveNumOfPhyCam(cam, numOfAcitvePhyCam);
-    if (gMuxer->m_bMpoEnabled && numOfAcitvePhyCam <= 1) {
-        gMuxer->m_bMpoEnabled = 0;
-    }
     CDBG_HIGH("%s: dualCamera MPO Enabled:%d ", __func__, gMuxer->m_bMpoEnabled);
 
     if (!gMuxer->mJpegClientHandle) {
@@ -1172,88 +1027,6 @@ int QCameraMuxer::take_picture(struct camera_device * device)
     gMuxer->m_AuxJpegQ.init();
     gMuxer->m_ComposeMpoTh.sendCmd(
             CAMERA_CMD_TYPE_START_DATA_PROC, FALSE, FALSE);
-
-    // In cases where recording hint is set, preview is running,
-    // hwi->take_picture will internally restart the preview.
-    // To take the preview restart control in muxer,
-    // 1. call pre_take_picture first
-    for (uint32_t i = 0; i < cam->numCameras; i++) {
-        pCam = gMuxer->getPhysicalCamera(cam, i);
-        CHECK_CAMERA_ERROR(pCam);
-
-        QCamera2HardwareInterface *hwi = pCam->hwi;
-        CHECK_HWI_ERROR(hwi);
-
-        // no need to call pre_take_pic on Aux if not MPO (for AOST,liveshot...etc.)
-        if ( (gMuxer->m_bMpoEnabled == 1) || (pCam->mode == CAM_MODE_PRIMARY) ) {
-            rc = hwi->pre_take_picture(pCam->dev);
-            if (rc != NO_ERROR) {
-                ALOGE("%s: Error preparing take_picture!! ", __func__);
-                return rc;
-            }
-        }
-    }
-
-    // 2. Check if preview restart is needed. Check all cameras.
-    for (uint32_t i = 0; i < cam->numCameras; i++) {
-        pCam = gMuxer->getPhysicalCamera(cam, i);
-        CHECK_CAMERA_ERROR(pCam);
-
-        QCamera2HardwareInterface *hwi = pCam->hwi;
-        CHECK_HWI_ERROR(hwi);
-
-        if (hwi->isPreviewRestartNeeded()) {
-            previewRestartNeeded = hwi->isPreviewRestartNeeded();
-            break;
-        }
-    }
-
-    if (previewRestartNeeded) {
-        // 3. if preview restart needed. stop the preview first
-        for (uint32_t i = 0; i < cam->numCameras; i++) {
-            pCam = gMuxer->getPhysicalCamera(cam, i);
-            CHECK_CAMERA_ERROR(pCam);
-
-            QCamera2HardwareInterface *hwi = pCam->hwi;
-            CHECK_HWI_ERROR(hwi);
-
-            rc = hwi->restart_stop_preview(pCam->dev);
-            if (rc != NO_ERROR) {
-                ALOGE("%s: Error in restart stop preview!! ", __func__);
-                return rc;
-            }
-        }
-
-        //4. Update the recording hint value to FALSE
-        for (uint32_t i = 0; i < cam->numCameras; i++) {
-            pCam = gMuxer->getPhysicalCamera(cam, i);
-            CHECK_CAMERA_ERROR(pCam);
-
-            QCamera2HardwareInterface *hwi = pCam->hwi;
-            CHECK_HWI_ERROR(hwi);
-
-            rc = hwi->setRecordingHintValue(FALSE);
-            if (rc != NO_ERROR) {
-                ALOGE("%s: Error in setting recording hint value!! ", __func__);
-                return rc;
-            }
-        }
-
-        // 5. start the preview
-        for (uint32_t i = 0; i < cam->numCameras; i++) {
-            pCam = gMuxer->getPhysicalCamera(cam, i);
-            CHECK_CAMERA_ERROR(pCam);
-
-            QCamera2HardwareInterface *hwi = pCam->hwi;
-            CHECK_HWI_ERROR(hwi);
-
-            rc = hwi->restart_start_preview(pCam->dev);
-            if (rc != NO_ERROR) {
-                ALOGE("%s: Error in restart start preview!! ", __func__);
-                return rc;
-            }
-        }
-    }
 
     // As frame sync for dual cameras is enabled, the take picture call
     // for secondary camera is handled only till HAL level to init corresponding
@@ -1347,7 +1120,6 @@ int QCameraMuxer::set_parameters(struct camera_device * device,
     qcamera_physical_descriptor_t *pCam = NULL;
     qcamera_logical_descriptor_t *cam = gMuxer->getLogicalCamera(device);
     CHECK_CAMERA_ERROR(cam);
-    int previewRestartNeeded = 0;
 
     for (uint32_t i = 0; i < cam->numCameras; i++) {
         pCam = gMuxer->getPhysicalCamera(cam, i);
@@ -1362,58 +1134,6 @@ int QCameraMuxer::set_parameters(struct camera_device * device,
             return rc;
         }
     }
-
-    for (uint32_t i = 0; i < cam->numCameras; i++) {
-        pCam = gMuxer->getPhysicalCamera(cam, i);
-        CHECK_CAMERA_ERROR(pCam);
-
-        QCamera2HardwareInterface *hwi = pCam->hwi;
-        CHECK_HWI_ERROR(hwi);
-
-        rc = QCamera2HardwareInterface::preview_restart_needed(pCam->dev,
-                                                    previewRestartNeeded);
-        if (rc != NO_ERROR) {
-            ALOGE("%s: Error get restart status rc=%d!! ", __func__, rc);
-            return rc;
-        }
-        if (previewRestartNeeded) {
-            CDBG_HIGH("%s: Need Restart Preview from Muxer.", __func__);
-            break;
-        }
-    }
-
-    for (uint32_t i = 0; i < cam->numCameras; i++) {
-        pCam = gMuxer->getPhysicalCamera(cam, i);
-        CHECK_CAMERA_ERROR(pCam);
-
-        QCamera2HardwareInterface *hwi = pCam->hwi;
-        CHECK_HWI_ERROR(hwi);
-
-        CDBG("%s: stopping preview for cam %d", __func__, i);
-        rc = QCamera2HardwareInterface::commit_parameters_stop_preview(
-                                          pCam->dev, previewRestartNeeded);
-        if (rc != NO_ERROR) {
-            ALOGE("%s: Error committing parameters rc=%d!! ", __func__, rc);
-            return rc;
-        }
-    }
-
-    for (uint32_t i = 0; i < cam->numCameras; i++) {
-        pCam = gMuxer->getPhysicalCamera(cam, i);
-        CHECK_CAMERA_ERROR(pCam);
-
-        QCamera2HardwareInterface *hwi = pCam->hwi;
-        CHECK_HWI_ERROR(hwi);
-
-        CDBG("%s: starting preview for cam %d", __func__, i);
-        rc = QCamera2HardwareInterface::commit_parameters_start_preview(
-                                          pCam->dev, previewRestartNeeded);
-        if (rc != NO_ERROR) {
-            ALOGE("%s: Error committing parameters rc=%d!! ", __func__, rc);
-            return rc;
-        }
-    }
-
     CDBG_HIGH("%s: X", __func__);
     return rc;
 }
@@ -1436,6 +1156,7 @@ char* QCameraMuxer::get_parameters(struct camera_device * device)
         return NULL;
 
     char* ret = NULL;
+    int rc = NO_ERROR;
     qcamera_physical_descriptor_t *pCam = NULL;
     qcamera_logical_descriptor_t *cam = gMuxer->getLogicalCamera(device);
     if (!cam) {
@@ -1540,22 +1261,6 @@ int QCameraMuxer::send_command(struct camera_device * device,
 
         switch (cmd) {
 #ifndef VANILLA_HAL
-        case CAMERA_CMD_LONGSHOT_ON:
-            for (uint32_t i = 0; i < cam->numCameras; i++) {
-                pCam = gMuxer->getPhysicalCamera(cam, i);
-                CHECK_CAMERA_ERROR(pCam);
-
-                QCamera2HardwareInterface *hwi = pCam->hwi;
-                CHECK_HWI_ERROR(hwi);
-
-                rc = QCamera2HardwareInterface::send_command_restart(pCam->dev,
-                        cmd, arg1, arg2);
-                if (rc != NO_ERROR) {
-                    ALOGE("%s: Error sending command restart !! ", __func__);
-                    return rc;
-                }
-            }
-        break;
         case CAMERA_CMD_LONGSHOT_OFF:
             gMuxer->m_ComposeMpoTh.sendCmd(CAMERA_CMD_TYPE_STOP_DATA_PROC,
                     FALSE, FALSE);
@@ -1718,7 +1423,7 @@ int QCameraMuxer::close_camera_device(hw_device_t *hw_dev)
         CHECK_CAMERA_ERROR(pCam);
 
         hw_device_t *dev = (hw_device_t*)(pCam->dev);
-        CDBG_HIGH("%s: hw device %p, hw %p", __func__, dev, pCam->hwi);
+        CDBG_HIGH("%s: hw device %x, hw %x", __func__, dev, pCam->hwi);
 
         rc = QCamera2HardwareInterface::close_camera_device(dev);
         if (rc != NO_ERROR) {
@@ -1748,6 +1453,7 @@ int QCameraMuxer::setupLogicalCameras()
     int rc = NO_ERROR;
     char prop[PROPERTY_VALUE_MAX];
     int i = 0;
+    camera_info info;
     int primaryType = CAM_TYPE_MAIN;
 
     CDBG_HIGH("%s[%d] E: rc = %d", __func__, __LINE__, rc);
@@ -1903,7 +1609,7 @@ int QCameraMuxer::getNumberOfCameras()
  *              none-zero failure code
  *==========================================================================*/
 int QCameraMuxer::getCameraInfo(int camera_id,
-        struct camera_info *info, __unused cam_sync_type_t *p_cam_type)
+        struct camera_info *info, cam_sync_type_t *p_cam_type)
 {
     int rc = NO_ERROR;
     CDBG_HIGH("%s: E, camera_id = %d", __func__, camera_id);
@@ -2151,7 +1857,7 @@ int QCameraMuxer::cameraDeviceOpen(int camera_id,
             m_pPhyCamera[phyId].dev = reinterpret_cast<camera_device_t*>(hw_dev[i]);
             m_pPhyCamera[phyId].hwi = hw;
             cam->sId[i] = m_pPhyCamera[phyId].camera_server_id;
-            CDBG_HIGH("%s: camera id %d server id : %d hw device %p, hw %p",
+            CDBG_HIGH("%s: camera id %d server id : %d hw device %x, hw %x",
                     __func__, phyId, cam->sId[i], hw_dev[i], hw);
         }
     } else {
@@ -2210,30 +1916,6 @@ qcamera_physical_descriptor_t* QCameraMuxer::getPhysicalCamera(
 }
 
 /*===========================================================================
- * FUNCTION   : getActiveNumOfPhyCam
- *
- * DESCRIPTION: Get active physical camera number in Logical Camera
- *
- * PARAMETERS :
- *   @log_cam :   Logical camera descriptor
- *   @numOfAcitvePhyCam :  number of active physical camera in Logical Camera.
- *
- * RETURN     :
- *                NO_ERROR  : success
- *                ENODEV : Camera not found
- *                other: non-zero failure code
- *==========================================================================*/
-int32_t QCameraMuxer::getActiveNumOfPhyCam(
-        qcamera_logical_descriptor_t* log_cam, int& numOfAcitvePhyCam)
-{
-    CHECK_CAMERA_ERROR(log_cam);
-
-    numOfAcitvePhyCam = log_cam->numCameras;
-    return NO_ERROR;
-}
-
-
-/*===========================================================================
  * FUNCTION   : sendEvtNotify
  *
  * DESCRIPTION: send event notify to HWI for error callbacks
@@ -2251,6 +1933,7 @@ int32_t QCameraMuxer::sendEvtNotify(int32_t msg_type, int32_t ext1,
         int32_t ext2)
 {
     CDBG_HIGH("%s: E", __func__);
+    int rc = NO_ERROR;
 
     CHECK_MUXER_ERROR();
 
@@ -2346,8 +2029,8 @@ void QCameraMuxer::composeMpo(cam_compose_jpeg_info_t* main_Jpeg,
                     mpo_compose_info.primary_image.buf_vaddr,
                     mpo_compose_info.primary_image.buf_filled_len);
             fchmod(file_fd_main, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-            CDBG("%s: written number of bytes for main Image %ld\n",
-                    __func__, (long)written_len);
+            CDBG("%s: written number of bytes for main Image %zd\n",
+                    __func__, written_len);
             close(file_fd_main);
         }
 
@@ -2363,8 +2046,8 @@ void QCameraMuxer::composeMpo(cam_compose_jpeg_info_t* main_Jpeg,
                     mpo_compose_info.aux_images[0].buf_vaddr,
                     mpo_compose_info.aux_images[0].buf_filled_len);
             fchmod(file_fd_aux, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-            CDBG("%s: written number of bytes for Aux Image %ld\n",
-                    __func__, (long)written_len);
+            CDBG("%s: written number of bytes for Aux Image %zd\n",
+                    __func__, written_len);
             close(file_fd_aux);
         }
     }
@@ -2391,8 +2074,8 @@ void QCameraMuxer::composeMpo(cam_compose_jpeg_info_t* main_Jpeg,
                     m_pRelCamMpoJpeg->data,
                     m_pRelCamMpoJpeg->size);
             fchmod(file_fd_mpo, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-            CDBG("%s: written number of bytes for MPO Image %ld\n",
-                    __func__, (long)written_len);
+            CDBG("%s: written number of bytes for MPO Image %zd\n",
+                    __func__, written_len);
             close(file_fd_mpo);
         }
     }
@@ -2425,7 +2108,7 @@ void QCameraMuxer::composeMpo(cam_compose_jpeg_info_t* main_Jpeg,
  *
  * RETURN     : true or false based on whether match was successful or not
  *==========================================================================*/
-bool QCameraMuxer::matchFrameId(void *data, __unused void *user_data,
+bool QCameraMuxer::matchFrameId(void *data, void *user_data,
         void *match_data)
 {
     CDBG_HIGH("%s: E", __func__);
@@ -2452,7 +2135,7 @@ bool QCameraMuxer::matchFrameId(void *data, __unused void *user_data,
  *
  * RETURN     : true or false based on whether match was successful or not
  *==========================================================================*/
-bool QCameraMuxer::findPreviousJpegs(void *data, __unused void *user_data,
+bool QCameraMuxer::findPreviousJpegs(void *data, void *user_data,
         void *match_data)
 {
     CDBG_HIGH("%s: E", __func__);
@@ -2478,7 +2161,7 @@ bool QCameraMuxer::findPreviousJpegs(void *data, __unused void *user_data,
  *
  * RETURN     : None
  *==========================================================================*/
-void QCameraMuxer::releaseJpegInfo(void *data, __unused void *user_data)
+void QCameraMuxer::releaseJpegInfo(void *data, void *user_data)
 {
     CDBG_HIGH("%s: E", __func__);
 
@@ -2503,7 +2186,7 @@ void QCameraMuxer::releaseJpegInfo(void *data, __unused void *user_data)
  *
  * RETURN     : void* to thread
  *==========================================================================*/
-void* QCameraMuxer::composeMpoRoutine(__unused void *data)
+void* QCameraMuxer::composeMpoRoutine(void *data)
 {
     CDBG_HIGH("%s: E", __func__);
     if (!gMuxer) {
@@ -2516,6 +2199,7 @@ void* QCameraMuxer::composeMpoRoutine(__unused void *data)
     uint8_t is_active = FALSE;
     QCameraCmdThread *cmdThread = &gMuxer->m_ComposeMpoTh;
     cmdThread->setName("CAM_ComposeMpo");
+    char saveName[PROPERTY_VALUE_MAX];
 
     do {
         do {
@@ -2780,35 +2464,35 @@ int32_t QCameraMuxer::storeJpeg(cam_sync_type_t cam_type,
 
 // Muxer Ops
 camera_device_ops_t QCameraMuxer::mCameraMuxerOps = {
-    .set_preview_window =        QCameraMuxer::set_preview_window,
-    .set_callbacks =             QCameraMuxer::set_callBacks,
-    .enable_msg_type =           QCameraMuxer::enable_msg_type,
-    .disable_msg_type =          QCameraMuxer::disable_msg_type,
-    .msg_type_enabled =          QCameraMuxer::msg_type_enabled,
+    set_preview_window:         QCameraMuxer::set_preview_window,
+    set_callbacks:              QCameraMuxer::set_callBacks,
+    enable_msg_type:            QCameraMuxer::enable_msg_type,
+    disable_msg_type:           QCameraMuxer::disable_msg_type,
+    msg_type_enabled:           QCameraMuxer::msg_type_enabled,
 
-    .start_preview =             QCameraMuxer::start_preview,
-    .stop_preview =              QCameraMuxer::stop_preview,
-    .preview_enabled =           QCameraMuxer::preview_enabled,
-    .store_meta_data_in_buffers= QCameraMuxer::store_meta_data_in_buffers,
+    start_preview:              QCameraMuxer::start_preview,
+    stop_preview:               QCameraMuxer::stop_preview,
+    preview_enabled:            QCameraMuxer::preview_enabled,
+    store_meta_data_in_buffers: QCameraMuxer::store_meta_data_in_buffers,
 
-    .start_recording =           QCameraMuxer::start_recording,
-    .stop_recording =            QCameraMuxer::stop_recording,
-    .recording_enabled =         QCameraMuxer::recording_enabled,
-    .release_recording_frame =   QCameraMuxer::release_recording_frame,
+    start_recording:            QCameraMuxer::start_recording,
+    stop_recording:             QCameraMuxer::stop_recording,
+    recording_enabled:          QCameraMuxer::recording_enabled,
+    release_recording_frame:    QCameraMuxer::release_recording_frame,
 
-    .auto_focus =                QCameraMuxer::auto_focus,
-    .cancel_auto_focus =         QCameraMuxer::cancel_auto_focus,
+    auto_focus:                 QCameraMuxer::auto_focus,
+    cancel_auto_focus:          QCameraMuxer::cancel_auto_focus,
 
-    .take_picture =              QCameraMuxer::take_picture,
-    .cancel_picture =            QCameraMuxer::cancel_picture,
+    take_picture:               QCameraMuxer::take_picture,
+    cancel_picture:             QCameraMuxer::cancel_picture,
 
-    .set_parameters =            QCameraMuxer::set_parameters,
-    .get_parameters =            QCameraMuxer::get_parameters,
-    .put_parameters =            QCameraMuxer::put_parameters,
-    .send_command =              QCameraMuxer::send_command,
+    set_parameters:             QCameraMuxer::set_parameters,
+    get_parameters:             QCameraMuxer::get_parameters,
+    put_parameters:             QCameraMuxer::put_parameters,
+    send_command:               QCameraMuxer::send_command,
 
-    .release =                   QCameraMuxer::release,
-    .dump =                      QCameraMuxer::dump,
+    release:                    QCameraMuxer::release,
+    dump:                       QCameraMuxer::dump,
 };
 
 

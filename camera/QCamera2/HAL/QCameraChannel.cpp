@@ -796,41 +796,6 @@ QCameraVideoChannel::~QCameraVideoChannel()
 }
 
 /*===========================================================================
- * FUNCTION   : takePicture
- *
- * DESCRIPTION: send request for queued snapshot frames
- *
- * PARAMETERS :
- *   @mm_camera_req_buf_t : request buf info
- *
- * RETURN     : int32_t type of status
- *              NO_ERROR  -- success
- *              none-zero failure code
- *==========================================================================*/
-int32_t QCameraVideoChannel::takePicture(mm_camera_req_buf_t *buf)
-{
-    int32_t rc = m_camOps->request_super_buf(m_camHandle, m_handle, buf);
-    return rc;
-}
-
-/*===========================================================================
- * FUNCTION   : cancelPicture
- *
- * DESCRIPTION: cancel request for queued snapshot frames
- *
- * PARAMETERS : none
- *
- * RETURN     : int32_t type of status
- *              NO_ERROR  -- success
- *              none-zero failure code
- *==========================================================================*/
-int32_t QCameraVideoChannel::cancelPicture()
-{
-    int32_t rc = m_camOps->cancel_super_buf_request(m_camHandle, m_handle);
-    return rc;
-}
-
-/*===========================================================================
  * FUNCTION   : releaseFrame
  *
  * DESCRIPTION: return video frame from app
@@ -951,16 +916,20 @@ int32_t QCameraReprocessChannel::addReprocStreamsFromSource(
     //can be rotated
     padding.width_padding = MAX(padding.width_padding, padding.height_padding);
     padding.height_padding = padding.width_padding;
+    padding.offset_info.offset_x = 0;
+    padding.offset_info.offset_y = 0;
 
     CDBG("%s : %d: num of src stream = %d", __func__, __LINE__, pSrcChannel->getNumOfStreams());
 
     for (uint32_t i = 0; i < pSrcChannel->getNumOfStreams(); i++) {
         pStream = pSrcChannel->getStreamByIndex(i);
         if (pStream != NULL) {
-            if (param.getofflineRAW() && !pStream->isTypeOf(CAM_STREAM_TYPE_RAW)) {
-                //Skip all the stream other than RAW incase of offline of RAW
+            if (param.getofflineRAW() && !((pStream->isTypeOf(CAM_STREAM_TYPE_RAW))
+                    || (pStream->isTypeOf(CAM_STREAM_TYPE_POSTVIEW)))) {
+                //Skip all the stream other than RAW and POSTVIEW incase of offline of RAW
                 continue;
             }
+
             if (pStream->isTypeOf(CAM_STREAM_TYPE_RAW) && !param.getofflineRAW()) {
                 // Skip raw for reprocess now because PP module cannot handle
                 // meta data&raw. May need furthur discussion if Imaginglib need meta data
@@ -976,20 +945,16 @@ int32_t QCameraReprocessChannel::addReprocStreamsFromSource(
             if (pStream->isTypeOf(CAM_STREAM_TYPE_PREVIEW) ||
                     pStream->isTypeOf(CAM_STREAM_TYPE_POSTVIEW) ||
                     pStream->isOrignalTypeOf(CAM_STREAM_TYPE_PREVIEW) ||
-                    pStream->isOrignalTypeOf(CAM_STREAM_TYPE_POSTVIEW) ||
-                    (param.getofflineRAW() && pStream->isTypeOf(CAM_STREAM_TYPE_RAW))) {
+                    pStream->isOrignalTypeOf(CAM_STREAM_TYPE_POSTVIEW)) {
                 uint32_t feature_mask = featureConfig.feature_mask;
 
                 // skip thumbnail reprocessing if not needed
                 if (!param.needThumbnailReprocess(&feature_mask)) {
                     continue;
                 }
-                // CAC, SHARPNESS, FLIP and WNR would have been already applied -
-                // on preview/postview stream in realtime. Need not apply again.
-                feature_mask &= ~(CAM_QCOM_FEATURE_DENOISE2D |
-                        CAM_QCOM_FEATURE_CAC |
-                        CAM_QCOM_FEATURE_SHARPNESS |
-                        CAM_QCOM_FEATURE_FLIP);
+
+                //Don't do WNR for thumbnail
+                feature_mask &= ~CAM_QCOM_FEATURE_DENOISE2D;
                 if (!feature_mask) {
                     // Skip thumbnail stream reprocessing since no other
                     //reprocessing is enabled.
@@ -1015,17 +980,20 @@ int32_t QCameraReprocessChannel::addReprocStreamsFromSource(
             } else {
                 rc = pStream->getFormat(streamInfo->fmt);
             }
+
             if (pStream->isTypeOf(CAM_STREAM_TYPE_POSTVIEW) ||
                     pStream->isTypeOf(CAM_STREAM_TYPE_PREVIEW)) {
                 param.getThumbnailSize(&(streamInfo->dim.width), &(streamInfo->dim.height));
             } else {
-                if ((param.getofflineRAW()) &&
-                        (pStream->isTypeOf(CAM_STREAM_TYPE_RAW))) {
-                    param.getStreamDimension(CAM_STREAM_TYPE_SNAPSHOT,streamInfo->dim);
+                if ((param.isPostProcScaling()) &&
+                        (featureConfig.feature_mask & CAM_QCOM_FEATURE_SCALE)) {
+                    rc = param.getStreamDimension(CAM_STREAM_TYPE_OFFLINE_PROC,
+                            streamInfo->dim);
                 } else {
                     rc = pStream->getFrameDimension(streamInfo->dim);
                 }
             }
+
             if ( contStream ) {
                 streamInfo->streaming_mode = CAM_STREAMING_MODE_CONTINUOUS;
                 streamInfo->num_of_burst = 0;
@@ -1033,6 +1001,7 @@ int32_t QCameraReprocessChannel::addReprocStreamsFromSource(
                 streamInfo->streaming_mode = CAM_STREAMING_MODE_BURST;
                 streamInfo->num_of_burst = burstNum;
             }
+            streamInfo->num_bufs = minStreamBufNum;
 
             cam_stream_reproc_config_t rp_cfg;
             memset(&rp_cfg, 0, sizeof(cam_stream_reproc_config_t));
@@ -1168,7 +1137,7 @@ QCameraStream * QCameraReprocessChannel::getStreamBySrouceHandle(uint32_t srcHan
 /*===========================================================================
  * FUNCTION   : stop
  *
- * DESCRIPTION: Unmap offline buffers and stop channel
+ * DESCRIPTION: stop channel and unmap offline buffers
  *
  * PARAMETERS : none
  *
@@ -1178,6 +1147,8 @@ QCameraStream * QCameraReprocessChannel::getStreamBySrouceHandle(uint32_t srcHan
  *==========================================================================*/
 int32_t QCameraReprocessChannel::stop()
 {
+    int32_t rc = QCameraChannel::stop();
+
     if (!mOfflineBuffers.empty()) {
         QCameraStream *stream = NULL;
         List<OfflineBuffer>::iterator it = mOfflineBuffers.begin();
@@ -1197,7 +1168,7 @@ int32_t QCameraReprocessChannel::stop()
         mOfflineBuffers.clear();
     }
 
-    return QCameraChannel::stop();
+    return rc;
 }
 
 /*===========================================================================

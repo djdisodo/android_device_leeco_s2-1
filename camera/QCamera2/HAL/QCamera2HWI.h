@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2016, The Linux Foundataion. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundataion. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -120,12 +120,12 @@ typedef struct {
     int32_t ext2;
 } qcamera_evt_argm_t;
 
-#define QCAMERA_DUMP_FRM_PREVIEW    1
-#define QCAMERA_DUMP_FRM_VIDEO      (1<<1)
-#define QCAMERA_DUMP_FRM_SNAPSHOT   (1<<2)
-#define QCAMERA_DUMP_FRM_THUMBNAIL  (1<<3)
-#define QCAMERA_DUMP_FRM_RAW        (1<<4)
-#define QCAMERA_DUMP_FRM_JPEG       (1<<5)
+#define QCAMERA_DUMP_FRM_PREVIEW             1
+#define QCAMERA_DUMP_FRM_VIDEO               (1<<1)
+#define QCAMERA_DUMP_FRM_SNAPSHOT            (1<<2)
+#define QCAMERA_DUMP_FRM_THUMBNAIL           (1<<3)
+#define QCAMERA_DUMP_FRM_RAW                 (1<<4)
+#define QCAMERA_DUMP_FRM_JPEG                (1<<5)
 
 #define QCAMERA_DUMP_FRM_MASK_ALL    0x000000ff
 
@@ -197,10 +197,6 @@ public:
     static void releaseNotifications(void *data, void *user_data);
     static bool matchSnapshotNotifications(void *data, void *user_data);
     static bool matchPreviewNotifications(void *data, void *user_data);
-#ifdef USE_MEDIA_EXTENSIONS
-    static bool matchTimestampNotifications(void *data, void *user_data);
-    virtual int32_t flushVideoNotifications();
-#endif
     virtual int32_t flushPreviewNotifications();
 private:
 
@@ -218,7 +214,9 @@ private:
 };
 
 class QCamera2HardwareInterface : public QCameraAllocator,
-        public QCameraThermalCallback, public QCameraAdjustFPS
+                                  public QCameraThermalCallback,
+                                  public QCameraAdjustFPS,
+                                  public QCameraTorchInterface
 {
 public:
     /* static variable and functions accessed by camera service */
@@ -239,16 +237,12 @@ public:
     static void stop_preview(struct camera_device *);
     static int preview_enabled(struct camera_device *);
     static int store_meta_data_in_buffers(struct camera_device *, int enable);
-    static int restart_start_preview(struct camera_device *);
-    static int restart_stop_preview(struct camera_device *);
-    static int pre_start_recording(struct camera_device *);
     static int start_recording(struct camera_device *);
     static void stop_recording(struct camera_device *);
     static int recording_enabled(struct camera_device *);
     static void release_recording_frame(struct camera_device *, const void *opaque);
     static int auto_focus(struct camera_device *);
     static int cancel_auto_focus(struct camera_device *);
-    static int pre_take_picture(struct camera_device *);
     static int take_picture(struct camera_device *);
     int takeLiveSnapshot_internal();
     int takeBackendPic_internal(bool *JpegMemOpt, char *raw_format);
@@ -256,15 +250,10 @@ public:
     void checkIntPicPending(bool JpegMemOpt, char *raw_format);
     static int cancel_picture(struct camera_device *);
     static int set_parameters(struct camera_device *, const char *parms);
-    static int commit_parameters_stop_preview(struct camera_device *, int needRestart);
-    static int commit_parameters_start_preview(struct camera_device *, int needRestart);
-    static int preview_restart_needed(struct camera_device *, int &needRestart);
     static char* get_parameters(struct camera_device *);
     static void put_parameters(struct camera_device *, char *);
     static int send_command(struct camera_device *,
               int32_t cmd, int32_t arg1, int32_t arg2);
-    static int send_command_restart(struct camera_device *,
-            int32_t cmd, int32_t arg1, int32_t arg2);
     static void release(struct camera_device *);
     static int dump(struct camera_device *, int fd);
     static int close_camera_device(hw_device_t *);
@@ -290,9 +279,6 @@ public:
             cam_sync_related_sensors_event_info_t* info);
     int32_t setMpoComposition(bool enable);
     bool getMpoComposition(void);
-    bool getRecordingHintValue(void);
-    int32_t setRecordingHintValue(int32_t value);
-    bool isPreviewRestartNeeded(void) { return mPreviewRestartNeeded; };
     static int getCapabilities(uint32_t cameraId,
             struct camera_info *info, cam_sync_type_t *cam_type);
     static int initCapabilities(uint32_t cameraId, mm_camera_vtbl_t *cameraHandle);
@@ -315,6 +301,10 @@ public:
 
     virtual int recalcFPSRange(int &minFPS, int &maxFPS,
             cam_fps_range_t &adjustedRange);
+
+    // Implementation of QCameraTorchInterface
+    virtual int prepareTorchCamera();
+    virtual int releaseTorchCamera();
 
     friend class QCameraStateMachine;
     friend class QCameraPostProcessor;
@@ -346,13 +336,11 @@ private:
     int startPreview();
     int stopPreview();
     int storeMetaDataInBuffers(int enable);
-    int preStartRecording();
     int startRecording();
     int stopRecording();
     int releaseRecordingFrame(const void *opaque);
     int autoFocus();
     int cancelAutoFocus();
-    int preTakePicture();
     int takePicture();
     int stopCaptureChannel(bool destroy);
     int cancelPicture();
@@ -413,7 +401,6 @@ private:
     uint32_t getJpegQuality();
     QCameraExif *getExifData();
     cam_sensor_t getSensorType();
-    bool isLowPowerMode();
 
     int32_t processAutoFocusEvent(cam_auto_focus_data_t &focus_data);
     int32_t processZoomEvent(cam_crop_data_t &crop_info);
@@ -476,7 +463,6 @@ private:
     int32_t setFaceDetection(bool enabled);
     int32_t prepareHardwareForSnapshot(int32_t afNeeded);
     bool needProcessPreviewFrame();
-    bool needSendPreviewCallback();
     bool isNoDisplayMode() {return mParameters.isNoDisplayMode();};
     bool isZSLMode() {return mParameters.isZSLMode();};
     bool isRdiMode() {return mParameters.isRdiMode();};
@@ -581,7 +567,7 @@ private:
     mm_camera_vtbl_t *mCameraHandle;
     bool mCameraOpened;
 
-    cam_jpeg_metadata_t mJpegMetadata;
+    cam_related_system_calibration_data_t mRelCamCalibData;
     bool m_bRelCamCalibValid;
 
     preview_stream_ops_t *mPreviewWindow;
@@ -635,8 +621,6 @@ private:
     bool m_HDRSceneEnabled;
     bool mLongshotEnabled;
 
-    uint32_t m_max_pic_width;
-    uint32_t m_max_pic_height;
     pthread_t mLiveSnapshotThread;
     pthread_t mIntPicThread;
     bool mFlashNeeded;
@@ -647,8 +631,6 @@ private:
     bool mIs3ALocked;
     bool mPrepSnapRun;
     int32_t mZoomLevel;
-    // Flag to indicate whether preview restart needed (for dual camera mode)
-    bool mPreviewRestartNeeded;
 
     int mVFrameCount;
     int mVLastFrameCount;
@@ -658,7 +640,6 @@ private:
     int mPLastFrameCount;
     nsecs_t mPLastFpsTime;
     double mPFps;
-    uint8_t mInstantAecFrameCount;
 
     //eztune variables for communication with eztune server at backend
     bool m_bIntJpegEvtPending;
@@ -703,7 +684,17 @@ private:
         BackgroundTask *genericArgs;
     } DeferWorkArgs;
 
-    uint32_t mDefOngoingJobs[MAX_ONGOING_JOBS];
+    typedef struct {
+        uint32_t mDefJobId;
+
+        //Job status is needed to check job was successful or failed
+        //Error code when job was not sucessful and there is error
+        //0 when is initialized.
+        //for sucessfull job, do not need to maintain job status
+        int32_t mDefJobStatus;
+    } DefOngoingJob;
+
+    DefOngoingJob mDefOngoingJobs[MAX_ONGOING_JOBS];
 
     struct DefWork
     {
@@ -727,10 +718,11 @@ private:
 
     uint32_t queueDeferredWork(DeferredWorkCmd cmd,
                                DeferWorkArgs args);
-    uint32_t dequeueDeferredWork(DefWork* dw);
+    uint32_t dequeueDeferredWork(DefWork* dw, int32_t jobStatus);
     int32_t waitDeferredWork(uint32_t &job_id);
     static void *deferredWorkRoutine(void *obj);
     bool checkDeferredWork(uint32_t &job_id);
+    int32_t getDefJobStatus(uint32_t &job_id);
 
     uint32_t mPostviewJob;
     uint32_t mReprocJob;
@@ -760,13 +752,6 @@ private:
     bool TsMakeupProcess_Snapshot(mm_camera_buf_def_t *pFrame,QCameraStream * pStream);
     bool TsMakeupProcess(mm_camera_buf_def_t *frame,QCameraStream * stream,TSRect& faceRect);
 #endif
-    bool mCACDoneReceived;
-
-    //GPU library to read buffer padding details.
-    void *lib_surface_utils;
-    int (*LINK_get_surface_pixel_alignment)();
-    uint32_t mSurfaceStridePadding;
-
     QCameraMemory *mMetadataMem;
 
     static uint32_t sNextJobId;
@@ -774,6 +759,12 @@ private:
     //Gralloc memory details
     pthread_mutex_t mGrallocLock;
     uint8_t mEnqueuedBuffers;
+    bool mCACDoneReceived;
+
+    //GPU library to read buffer padding details.
+    void *lib_surface_utils;
+    int (*LINK_get_surface_pixel_alignment)();
+    uint32_t mSurfaceStridePadding;
 };
 
 }; // namespace qcamera
